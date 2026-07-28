@@ -2,18 +2,30 @@
 
 Windows 11 本地伴生工具：显示最近 2 天、7 天或 30 天的 Codex 任务、最近活动时间、运行状态和剩余用量，并支持精确跳转、左右吸附与独立置顶。
 
-## 启动
+## 环境要求
 
-双击：
+- Windows 11
+- Codex Desktop
+- Python 3.12 或更高版本（安装时启用 `Add python.exe to PATH`）
+- PowerShell 7
+
+本项目只使用 Python 标准库，不需要安装额外的 Python 包。
+
+## 从源码运行
+
+使用 Git：
+
+```powershell
+git clone https://github.com/wyzg952/codex-recent-tasks-sidebar-windows.git
+cd .\codex-recent-tasks-sidebar-windows
+pwsh -File .\scripts\start.ps1
+```
+
+也可以在 GitHub 页面选择 `Code → Download ZIP`，解压后双击：
+
 
 ```text
 启动 Codex 最近任务.cmd
-```
-
-也可以在 PowerShell 7 中运行：
-
-```powershell
-pwsh -File .\scripts\start.ps1
 ```
 
 ## 随 Codex 自动启动
@@ -63,3 +75,7 @@ pwsh -File .\scripts\qa.ps1
 ## ChatGPT 会话边界
 
 当前版本只显示 Codex 任务。ChatGPT 普通对话没有公开的本地会话索引或官方“列出最近对话”接口；本工具不会读取浏览器 Cookie、调用未公开私有接口或抓取聊天正文来伪造支持。
+
+## 开源许可
+
+本项目采用 [MIT License](./LICENSE)。你可以使用、复制、修改、重新发布或打包成自己的程序，但需要在副本或主要衍生部分中保留原版权声明和许可证文本。
