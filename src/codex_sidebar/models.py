@@ -4,6 +4,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any
+
+
+MAX_VIEWED_TASKS = 500
 
 
 class RuntimeState(str, Enum):
@@ -78,6 +82,30 @@ class TaskGroup:
     @property
     def latest_update(self) -> int:
         return self.tasks[0].updated_ms if self.tasks else 0
+
+
+def normalize_viewed_task_versions(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    valid = {
+        task_id: updated_ms
+        for task_id, updated_ms in raw.items()
+        if isinstance(task_id, str)
+        and 0 < len(task_id) <= 128
+        and isinstance(updated_ms, int)
+        and not isinstance(updated_ms, bool)
+        and updated_ms > 0
+    }
+    return dict(sorted(valid.items(), key=lambda item: item[1], reverse=True)[:MAX_VIEWED_TASKS])
+
+
+def apply_viewed_task_versions(tasks: list[CodexTask], viewed: dict[str, int]) -> list[CodexTask]:
+    return [
+        task.with_updates(unread=False)
+        if task.unread and viewed.get(task.id, 0) >= task.updated_ms
+        else task
+        for task in tasks
+    ]
 
 
 def group_tasks(tasks: list[CodexTask], search: str = "") -> list[TaskGroup]:

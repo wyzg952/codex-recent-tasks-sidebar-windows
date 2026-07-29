@@ -3,7 +3,16 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from codex_sidebar.models import CodexTask, DisplayState, RuntimeState, group_tasks, short_time_label
+from codex_sidebar.models import (
+    MAX_VIEWED_TASKS,
+    CodexTask,
+    DisplayState,
+    RuntimeState,
+    apply_viewed_task_versions,
+    group_tasks,
+    normalize_viewed_task_versions,
+    short_time_label,
+)
 
 
 class ModelTests(unittest.TestCase):
@@ -30,6 +39,27 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(short_time_label(int((now - timedelta(seconds=20)).timestamp() * 1000), now), "刚刚")
         self.assertEqual(short_time_label(int((now - timedelta(minutes=12)).timestamp() * 1000), now), "12 分钟")
         self.assertEqual(short_time_label(int((now - timedelta(days=1)).timestamp() * 1000), now), "昨天 12:00")
+
+    def test_viewed_versions_survive_refresh_until_a_new_reply(self) -> None:
+        tasks = [
+            CodexTask("任务甲", "已查看", "C:/项目/甲", "main", 100, unread=True),
+            CodexTask("任务乙", "有新回复", "C:/项目/乙", "main", 200, unread=True),
+        ]
+        updated = apply_viewed_task_versions(tasks, {"任务甲": 100, "任务乙": 150})
+        self.assertFalse(updated[0].unread)
+        self.assertEqual(updated[0].display_state, DisplayState.IDLE)
+        self.assertTrue(updated[1].unread)
+        self.assertEqual(updated[1].display_state, DisplayState.NEEDS_REVIEW)
+
+    def test_viewed_versions_are_validated_and_bounded(self) -> None:
+        raw = {f"任务{index}": index + 1 for index in range(MAX_VIEWED_TASKS + 10)}
+        raw.update({"": 10, "错误时间": "10", "布尔值": True})
+        normalized = normalize_viewed_task_versions(raw)
+        self.assertEqual(len(normalized), MAX_VIEWED_TASKS)
+        self.assertNotIn("", normalized)
+        self.assertNotIn("错误时间", normalized)
+        self.assertNotIn("布尔值", normalized)
+        self.assertEqual(next(iter(normalized.values())), MAX_VIEWED_TASKS + 10)
 
 
 if __name__ == "__main__":

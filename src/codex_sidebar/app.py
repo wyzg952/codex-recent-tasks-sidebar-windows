@@ -9,7 +9,14 @@ from pathlib import Path
 from tkinter import ttk
 
 from .data import TaskRepository
-from .models import CodexTask, DisplayState, group_tasks, short_time_label
+from .models import (
+    CodexTask,
+    DisplayState,
+    apply_viewed_task_versions,
+    group_tasks,
+    normalize_viewed_task_versions,
+    short_time_label,
+)
 from .usage import UsageWindow, fetch_usage
 from .win32 import (
     compensate_visible_frame,
@@ -135,7 +142,9 @@ class SidebarApp:
         self.search_job: str | None = None
         self.geometry_job: str | None = None
         self.is_applying_dock = False
-        self.opened_task_id: str | None = None
+        self.viewed_task_versions = normalize_viewed_task_versions(
+            self.settings.get("viewed_task_versions")
+        )
         self.dock_topmost: bool | None = None
         self.closing = False
         self.status_text = tk.StringVar(value="正在读取 Codex 任务…")
@@ -360,8 +369,7 @@ class SidebarApp:
             self.refresh_button.configure(state="normal")
         try:
             loaded = future.result()
-            if self.opened_task_id:
-                loaded = [item.with_updates(current=item.id == self.opened_task_id) for item in loaded]
+            loaded = apply_viewed_task_versions(loaded, self.viewed_task_versions)
             if loaded != self.tasks:
                 self.tasks = loaded
                 self.render_tasks(preserve_scroll=bool(self.tasks))
@@ -480,10 +488,20 @@ class SidebarApp:
 
     def _open_task(self, task: CodexTask) -> None:
         try:
-            self.opened_task_id = task.id
-            self.tasks = [item.with_updates(current=item.id == task.id) for item in self.tasks]
-            self.render_tasks(preserve_scroll=True)
             open_task(task.id)
+            self.viewed_task_versions[task.id] = max(
+                task.updated_ms, self.viewed_task_versions.get(task.id, 0)
+            )
+            self.viewed_task_versions = normalize_viewed_task_versions(self.viewed_task_versions)
+            self.settings["viewed_task_versions"] = self.viewed_task_versions
+            self._save_settings()
+            self.tasks = [
+                item.with_updates(unread=False, current=True)
+                if item.id == task.id
+                else item.with_updates(current=False)
+                for item in self.tasks
+            ]
+            self.render_tasks(preserve_scroll=True)
             self.status_text.set("已打开对应 Codex 任务")
             self.root.after(1_500, self.refresh_full)
         except OSError as error:
