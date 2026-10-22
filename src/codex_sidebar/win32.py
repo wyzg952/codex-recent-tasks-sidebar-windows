@@ -118,7 +118,7 @@ def window_rect(hwnd: int) -> Rect | None:
     return None
 
 
-def find_codex_window() -> tuple[int, Rect] | None:
+def find_codex_window(preferred_hwnd: int | None = None) -> tuple[int, Rect] | None:
     found: list[tuple[int, Rect]] = []
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -142,6 +142,15 @@ def find_codex_window() -> tuple[int, Rect] | None:
 
     callback = callback_type(visit)
     user32.EnumWindows(callback, 0)
+    foreground = user32.GetForegroundWindow()
+    for pair in found:
+        if pair[0] == foreground:
+            return pair
+    if preferred_hwnd is not None:
+        # A hidden/minimized/closed bound window is NOT a reason to select a
+        # different background window. Only an explicitly foregrounded Codex
+        # window may take over; this also avoids binding to hidden helper UIs.
+        return next((pair for pair in found if pair[0] == preferred_hwnd), None)
     return max(found, key=lambda pair: pair[1].width * pair[1].height) if found else None
 
 

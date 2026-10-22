@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from codex_sidebar.app import APP_NAME, SidebarApp
 from codex_sidebar.tray import shell32
-from codex_sidebar.watcher import desired_action, sidebar_windows
+from codex_sidebar.watcher import close_sidebar_windows, desired_action, sidebar_windows
 from codex_sidebar.win32 import (
     Rect, acquire_sidebar_instance, find_codex_window, kernel32, top_level_hwnd, user32,
 )
@@ -31,9 +31,10 @@ class CompanionTests(unittest.TestCase):
         self.target = (self.hwnd, Rect(600, 100, 1300, 900))
 
     def tearDown(self) -> None:
-        for job in self.root.tk.call("after", "info"):
-            self.root.after_cancel(job)
-        self.app.close()
+        if not self.app.closing:
+            for job in self.root.tk.call("after", "info"):
+                self.root.after_cancel(job)
+            self.app.close()
         for item in reversed(self.patches):
             item.stop()
 
@@ -89,6 +90,103 @@ class CompanionTests(unittest.TestCase):
             self.app.tray._dispatch(self.app.tray.hwnd, self.app.tray.taskbar_created, 0, 0)
             notify.assert_called_once()
             self.assertEqual(notify.call_args.args[0], 0)
+
+    def test_close_button_hides_until_tray_double_click_in_both_modes(self) -> None:
+        for mode in ("pinned", "docked"):
+            with self.subTest(mode=mode), patch.object(self.app, "_apply_dock"):
+                self.app.mode = mode
+                self.find.return_value = self.target
+                self.app._sync_companion_visibility()
+                user32.PostMessageW(self.hwnd, 0x0010, 0, 0)
+                self.root.update()
+                for _ in range(3):
+                    self.app._sync_companion_visibility()
+                self.assertFalse(self.app.closing)
+                self.assertFalse(user32.IsWindowVisible(self.hwnd))
+                self.assertIn(self.hwnd, sidebar_windows())
+                self.assertTrue(self.app.tray.added)
+                self.assertTrue(self.app.manual_hidden)
+                user32.PostMessageW(self.app.tray.hwnd, self.app.tray.callback_message, 0, 0x0203)
+                self.root.update()
+                self.app._dock_tick()
+                self.assertTrue(user32.IsWindowVisible(self.hwnd))
+                self.assertFalse(self.app.manual_hidden)
+                self.assert_tool_window()
+
+    def test_manual_hide_resets_only_after_codex_hidden_then_restored(self) -> None:
+        self.find.return_value = self.target
+        self.app._sync_companion_visibility()
+        self.app.hide_to_tray()
+        self.find.return_value = None
+        self.app.restore_from_tray()
+        self.assertFalse(user32.IsWindowVisible(self.hwnd))
+        self.find.return_value = self.target
+        self.app._sync_companion_visibility()
+        self.assertTrue(user32.IsWindowVisible(self.hwnd))
+        self.app.hide_to_tray()
+        self.find.return_value = None
+        self.app._sync_companion_visibility()
+        self.find.return_value = self.target
+        self.app._sync_companion_visibility()
+        self.assertTrue(user32.IsWindowVisible(self.hwnd))
+
+    def test_internal_shutdown_still_exits(self) -> None:
+        close_sidebar_windows([self.hwnd])
+        self.root.update()
+        self.app._dock_tick()
+        self.assertTrue(self.app.closing)
+        self.assertFalse(self.app.tray.added)
+
+    def test_visibility_poll_is_rescheduled_after_transient_error(self) -> None:
+        with patch.object(self.app, "_sync_companion_visibility", side_effect=OSError("temporary")), \
+                patch.object(self.root, "after") as after:
+            with self.assertRaises(OSError):
+                self.app._dock_tick()
+            after.assert_called_once_with(400, self.app._dock_tick)
+
+    def test_real_bound_window_minimize_does_not_switch_to_background_window(self) -> None:
+        primary = tk.Toplevel(self.root)
+        primary.title("主要测试窗口")
+        primary.geometry("600x400+40+40")
+        other = tk.Toplevel(self.root)
+        other.title("后台测试窗口")
+        other.geometry("800x600+60+60")
+        self.root.update()
+        first = top_level_hwnd(primary.winfo_id())
+        second = top_level_hwnd(other.winfo_id())
+        def enumerate_targets(callback, param):
+            callback(first, param)
+            callback(second, param)
+        try:
+            with patch("codex_sidebar.win32.user32.EnumWindows", side_effect=enumerate_targets), \
+                    patch("codex_sidebar.win32._process_path", return_value=r"C:\WindowsApps\OpenAI.Codex_test\app\ChatGPT.exe"), \
+                    patch("codex_sidebar.win32.user32.GetForegroundWindow", return_value=first) as foreground, \
+                    patch("codex_sidebar.app.find_codex_window", side_effect=find_codex_window):
+                self.app._sync_companion_visibility()
+                self.assertEqual(self.app.codex_hwnd, first)
+                self.assertTrue(user32.IsWindowVisible(self.hwnd))
+                user32.ShowWindow(first, 6)
+                foreground.return_value = 0
+                self.root.update()
+                self.app._sync_companion_visibility()
+                self.assertTrue(user32.IsWindowVisible(second))
+                self.assertFalse(user32.IsWindowVisible(self.hwnd))
+                self.assertEqual(self.app.codex_hwnd, first)
+                primary.withdraw()
+                self.root.update()
+                self.app._sync_companion_visibility()
+                self.assertFalse(user32.IsWindowVisible(self.hwnd))
+                primary.deiconify()
+                self.root.update()
+                self.app._sync_companion_visibility()
+                self.assertTrue(user32.IsWindowVisible(self.hwnd))
+                foreground.return_value = second
+                self.app._sync_companion_visibility()
+                self.assertEqual(self.app.codex_hwnd, second)
+                self.assert_tool_window()
+        finally:
+            primary.destroy()
+            other.destroy()
 
 
 class InstanceTests(unittest.TestCase):

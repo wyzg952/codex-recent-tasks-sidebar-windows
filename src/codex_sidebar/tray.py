@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from collections import deque
 from ctypes import wintypes
 from pathlib import Path
 from typing import Callable
@@ -60,12 +61,14 @@ shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 class TrayIcon:
     """Hidden native window; Tk's thread message loop dispatches its events."""
 
-    def __init__(self, icon_path: Path, on_activate: Callable[[], None]) -> None:
+    def __init__(self, icon_path: Path, on_activate: Callable[[], None], on_exit: Callable[[], None]) -> None:
         self.hwnd = None
         self.icon = None
         self.registered = False
         self.added = False
         self.on_activate = on_activate
+        self.on_exit = on_exit
+        self.pending_events: deque[str] = deque()
         self.instance = kernel32.GetModuleHandleW(None)
         self.class_name = f"CodexSidebarTray_{os.getpid()}"
         self.taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
@@ -85,7 +88,7 @@ class TrayIcon:
                 raise ctypes.WinError(ctypes.get_last_error())
             self.data = NOTIFYICONDATAW(cbSize=ctypes.sizeof(NOTIFYICONDATAW), hWnd=self.hwnd,
                                         uID=1, uFlags=7, uCallbackMessage=self.callback_message,
-                                        hIcon=self.icon, szTip="Codex 最近任务 · 随 Codex 自动显示和隐藏")
+                                        hIcon=self.icon, szTip="Codex 最近任务 · 双击恢复 · 随 Codex 显示和隐藏")
             self.ensure_icon()
         except Exception:
             self.close()
@@ -96,15 +99,28 @@ class TrayIcon:
             self.added = bool(shell32.Shell_NotifyIconW(0, ctypes.byref(self.data)))
 
     def _dispatch(self, hwnd: int, message: int, wparam: int, lparam: int) -> int:
+        if message == 0x0010:  # Internal shutdown; the host has no visible close button.
+            self.pending_events.append("exit")
+            return 0
         if message == self.taskbar_created:
             self.added = False
             if hasattr(self, "data"):
                 self.ensure_icon()
             return 0
         if message == self.callback_message and lparam == 0x0203:
-            self.on_activate()
+            self.pending_events.append("activate")
             return 0
         return user32.DefWindowProcW(hwnd, message, wparam, lparam)
+
+    def dispatch_pending(self) -> None:
+        # Never enter Tcl from a ctypes WndProc callback. The ordinary Tk timer
+        # drains these events outside native message dispatch (avoids GIL crashes).
+        while self.pending_events:
+            event = self.pending_events.popleft()
+            if event == "exit":
+                self.on_exit()
+                return
+            self.on_activate()
 
     def close(self) -> None:
         if self.added:

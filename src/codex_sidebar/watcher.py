@@ -25,6 +25,8 @@ user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.restype = ctypes.c_int
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
+user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+user32.FindWindowW.restype = wintypes.HWND
 
 
 def desired_action(codex_open: bool, sidebar_open: bool, launch_allowed: bool = True) -> str:
@@ -55,7 +57,12 @@ def sidebar_windows() -> list[int]:
 
 def close_sidebar_windows(windows: list[int] | None = None) -> None:
     for hwnd in windows if windows is not None else sidebar_windows():
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        tray_host = user32.FindWindowW(f"CodexSidebarTray_{pid.value}", None)
         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        if tray_host:
+            user32.PostMessageW(tray_host, WM_CLOSE, 0, 0)
 
 
 def _pythonw_executable() -> Path:

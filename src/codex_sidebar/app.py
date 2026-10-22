@@ -130,6 +130,9 @@ class SidebarApp:
         self.root = root
         self.root.withdraw()
         self.companion_visible = False
+        self.codex_hwnd: int | None = None
+        self.codex_was_visible = False
+        self.manual_hidden = False
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
         self.mode = str(self.settings.get("mode", "docked"))
@@ -175,9 +178,10 @@ class SidebarApp:
         self._refresh_mode_controls()
         self.tray = TrayIcon(
             Path(__file__).resolve().parents[2] / "assets" / "AppIcon.ico",
-            lambda: self.root.after(0, self._sync_companion_visibility),
+            self.restore_from_tray,
+            self.close,
         )
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self.root.bind("<Configure>", self._on_configure)
         self.root.after(50, self.refresh_full)
         self.root.after(100, self.refresh_usage)
@@ -673,7 +677,7 @@ class SidebarApp:
     def _apply_dock(self, found=None) -> None:
         if is_left_mouse_down():
             return
-        found = found or find_codex_window()
+        found = found or find_codex_window(self.codex_hwnd)
         if not found:
             self.status_text.set("等待 Codex 窗口")
             return
@@ -732,32 +736,62 @@ class SidebarApp:
     def _dock_tick(self) -> None:
         if self.closing:
             return
-        self.tray.ensure_icon()
+        try:
+            self.tray.dispatch_pending()
+            if self.closing:
+                return
+            self.tray.ensure_icon()
+            self._sync_companion_visibility()
+        finally:
+            # One transient native/Tk error must not stop visibility polling.
+            if not self.closing:
+                self.root.after(400, self._dock_tick)
+
+    def _hide_companion(self) -> None:
+        if self.companion_visible:
+            self._save_window_geometry()
+            self.companion_visible = False
+            self.root.withdraw()
+            self.dock_topmost = None
+
+    def hide_to_tray(self) -> None:
+        if self.closing:
+            return
+        self.manual_hidden = True
+        self._hide_companion()
+
+    def restore_from_tray(self) -> None:
+        self.manual_hidden = False
         self._sync_companion_visibility()
-        self.root.after(400, self._dock_tick)
 
     def _sync_companion_visibility(self) -> None:
         if self.closing:
             return
-        found = find_codex_window()
+        found = find_codex_window(self.codex_hwnd)
         if not found:
-            if self.companion_visible:
-                self._save_window_geometry()
-                self.companion_visible = False
-                self.root.withdraw()
-                self.dock_topmost = None
+            self.codex_was_visible = False
+            self._hide_companion()
+            return
+        if not self.codex_was_visible or found[0] != self.codex_hwnd:
+            self.manual_hidden = False
+        self.codex_hwnd = found[0]
+        self.codex_was_visible = True
+        if self.manual_hidden:
             return
         if not self.companion_visible:
             self.root.update_idletasks()
             hwnd = top_level_hwnd(self.root.winfo_id())
             set_companion_style(hwnd, no_activate=True)
             try:
+                self.companion_visible = True
                 show_without_activation(hwnd)
                 # Process the native map event while NOACTIVATE is still set.
                 self.root.update()
             finally:
-                set_companion_style(top_level_hwnd(self.root.winfo_id()))
-            self.companion_visible = True
+                if not self.closing:
+                    set_companion_style(top_level_hwnd(self.root.winfo_id()))
+            if self.closing or not self.companion_visible:
+                return
             self.dock_topmost = None
         if self.mode == "docked":
             self._apply_dock(found)
@@ -817,6 +851,8 @@ class SidebarApp:
             return
         self._save_window_geometry()
         self.closing = True
+        for job in self.root.tk.call("after", "info"):
+            self.root.after_cancel(job)
         self.tray.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
