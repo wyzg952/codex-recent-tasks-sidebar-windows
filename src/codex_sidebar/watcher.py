@@ -30,8 +30,6 @@ user32.PostMessageW.restype = wintypes.BOOL
 def desired_action(codex_open: bool, sidebar_open: bool, launch_allowed: bool = True) -> str:
     if codex_open and not sidebar_open and launch_allowed:
         return "launch"
-    if not codex_open and sidebar_open:
-        return "close"
     return "none"
 
 
@@ -40,8 +38,7 @@ def sidebar_windows() -> list[int]:
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def visit(hwnd: int, _lparam: int) -> bool:
-        if not user32.IsWindowVisible(hwnd):
-            return True
+        # Withdrawn Tk windows still identify the resident tray instance.
         length = user32.GetWindowTextLengthW(hwnd)
         if length != len(APP_NAME):
             return True
@@ -104,8 +101,6 @@ def run() -> int:
             if action == "launch":
                 launch_sidebar()
                 next_launch_at = now + LAUNCH_RETRY_SECONDS
-            elif action == "close":
-                close_sidebar_windows(windows)
             time.sleep(POLL_SECONDS)
     finally:
         kernel32.CloseHandle(mutex)

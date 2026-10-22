@@ -9,8 +9,8 @@ class WatcherDecisionTests(unittest.TestCase):
     def test_launches_when_codex_opens_without_sidebar(self) -> None:
         self.assertEqual(desired_action(True, False), "launch")
 
-    def test_closes_sidebar_when_codex_exits(self) -> None:
-        self.assertEqual(desired_action(False, True), "close")
+    def test_keeps_tray_sidebar_when_codex_exits(self) -> None:
+        self.assertEqual(desired_action(False, True), "none")
 
     def test_does_not_duplicate_existing_sidebar(self) -> None:
         self.assertEqual(desired_action(True, True), "none")

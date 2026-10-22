@@ -27,6 +27,18 @@ kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+user32.MonitorFromWindow.restype = wintypes.HANDLE
+user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongW.restype = wintypes.LONG
+user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+user32.SetWindowLongW.restype = wintypes.LONG
+kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.CreateMutexW.restype = wintypes.HANDLE
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD]
 dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
 
@@ -112,6 +124,9 @@ def find_codex_window() -> tuple[int, Rect] | None:
 
     def visit(hwnd: int, _lparam: int) -> bool:
         if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+        cloaked = wintypes.DWORD()
+        if dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0 and cloaked.value:
             return True
         item = visible_window_bounds(hwnd)
         if item is None:
@@ -233,6 +248,27 @@ def set_topmost(hwnd: int, enabled: bool) -> None:
 
 def top_level_hwnd(hwnd: int) -> int:
     return int(user32.GetAncestor(hwnd, GA_ROOT) or hwnd)
+
+
+def set_companion_style(hwnd: int, *, no_activate: bool = False) -> None:
+    style = user32.GetWindowLongW(hwnd, -20)
+    style = (style | 0x00000080) & ~0x00040000  # TOOLWINDOW, never APPWINDOW
+    style = style | 0x08000000 if no_activate else style & ~0x08000000
+    user32.SetWindowLongW(hwnd, -20, style)
+
+
+def show_without_activation(hwnd: int) -> None:
+    user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE; Tk observes WM_SIZE itself.
+
+
+def acquire_sidebar_instance() -> int | None:
+    handle = kernel32.CreateMutexW(None, False, "Local\\CodexRecentTasksSidebar")
+    if not handle:
+        return None
+    if ctypes.get_last_error() == 183:
+        kernel32.CloseHandle(handle)
+        return None
+    return int(handle)
 
 
 def open_task(thread_id: str) -> None:

@@ -13,20 +13,29 @@ from .models import (
     CodexTask,
     DisplayState,
     apply_viewed_task_versions,
+    filter_existing_project_tasks,
     group_tasks,
+    is_project_collapsed,
+    normalize_collapsed_projects,
     normalize_viewed_task_versions,
+    projects_with_new_activity,
     short_time_label,
 )
 from .usage import UsageWindow, fetch_usage
+from .tray import TrayIcon
 from .win32 import (
+    acquire_sidebar_instance,
     compensate_visible_frame,
     dock_position,
     enable_per_monitor_dpi,
     find_codex_window,
     is_codex_or_self_foreground,
     is_left_mouse_down,
+    kernel32,
     open_task,
     set_topmost,
+    set_companion_style,
+    show_without_activation,
     top_level_hwnd,
     visible_window_bounds,
     window_rect,
@@ -40,6 +49,7 @@ PANEL_HEIGHT = 720
 MIN_WIDTH = 280
 MIN_HEIGHT = 460
 RECENT_DAY_OPTIONS = (2, 7, 30)
+FULL_REFRESH_MS = 30_000
 
 COLORS = {
     "window": "#111315",
@@ -118,6 +128,8 @@ class ScrollFrame(tk.Frame):
 class SidebarApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        self.root.withdraw()
+        self.companion_visible = False
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
         self.mode = str(self.settings.get("mode", "docked"))
@@ -145,6 +157,10 @@ class SidebarApp:
         self.viewed_task_versions = normalize_viewed_task_versions(
             self.settings.get("viewed_task_versions")
         )
+        self.collapsed_projects = normalize_collapsed_projects(
+            self.settings.get("collapsed_projects")
+        )
+        self.has_loaded_tasks = False
         self.dock_topmost: bool | None = None
         self.closing = False
         self.status_text = tk.StringVar(value="正在读取 Codex 任务…")
@@ -157,17 +173,22 @@ class SidebarApp:
         self._configure_styles()
         self._build_ui()
         self._refresh_mode_controls()
+        self.tray = TrayIcon(
+            Path(__file__).resolve().parents[2] / "assets" / "AppIcon.ico",
+            lambda: self.root.after(0, self._sync_companion_visibility),
+        )
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._on_configure)
         self.root.after(50, self.refresh_full)
         self.root.after(100, self.refresh_usage)
         self.root.after(250, self._dock_tick)
         self.root.after(5_000, self._runtime_tick)
-        self.root.after(30_000, self._full_tick)
+        self.root.after(FULL_REFRESH_MS, self._full_tick)
         self.root.after(60_000, self._usage_tick)
 
     def _configure_window(self) -> None:
         self.root.title(APP_NAME)
+        self.root.attributes("-toolwindow", True)
         self.root.configure(bg=COLORS["window"])
         icon_path = Path(__file__).resolve().parents[2] / "assets" / "AppIcon.ico"
         if icon_path.is_file():
@@ -368,7 +389,18 @@ class SidebarApp:
         if not silent:
             self.refresh_button.configure(state="normal")
         try:
-            loaded = future.result()
+            loaded = filter_existing_project_tasks(future.result())
+            active_projects = (
+                projects_with_new_activity(self.tasks, loaded)
+                if self.has_loaded_tasks
+                else ({loaded[0].project_key} if loaded else set())
+            )
+            self.has_loaded_tasks = True
+            newly_expanded = self.collapsed_projects.intersection(active_projects)
+            if newly_expanded:
+                self.collapsed_projects.difference_update(newly_expanded)
+                self.settings["collapsed_projects"] = sorted(self.collapsed_projects)
+                self._save_settings()
             loaded = apply_viewed_task_versions(loaded, self.viewed_task_versions)
             if loaded != self.tasks:
                 self.tasks = loaded
@@ -419,7 +451,9 @@ class SidebarApp:
         if self.closing:
             return
         scroll = self.scroller.canvas.yview()[0] if preserve_scroll else 0.0
-        groups = group_tasks(self.tasks, self._query())
+        query = self._query()
+        groups = group_tasks(self.tasks, query)
+        searching = bool(query.strip())
         count = sum(len(group.tasks) for group in groups)
         self.summary_text.set(f"{len(groups)} 个文件夹 · {count} 个任务 · 最近 {self.recent_days} 天")
         self.scroller.clear()
@@ -436,16 +470,62 @@ class SidebarApp:
                 highlightbackground=COLORS["border"],
             )
             card.pack(fill="x", padx=12, pady=(12 if index == 0 else 0, 12))
-            heading = tk.Frame(card, bg=COLORS["card"], padx=12, pady=10)
+            collapsed = is_project_collapsed(group.path, self.collapsed_projects, query)
+            heading_cursor = "arrow" if searching else "hand2"
+            heading = tk.Frame(card, bg=COLORS["card"], padx=12, pady=10, cursor=heading_cursor)
             heading.pack(fill="x")
-            tk.Label(heading, text="●", bg=COLORS["card"], fg=COLORS["accent"], font=("Segoe UI Symbol", 8)).pack(side="left")
-            tk.Label(heading, text=self._truncate(group.name, 28), bg=COLORS["card"], fg=COLORS["text"], font=("Microsoft YaHei UI", 9, "bold"), anchor="w").pack(side="left", padx=(8, 6), fill="x", expand=True)
-            tk.Label(heading, text=f"{len(group.tasks)} 条", bg=COLORS["nested"], fg=COLORS["muted"], font=("Microsoft YaHei UI", 8), padx=6, pady=2).pack(side="right")
+            arrow = tk.Label(
+                heading,
+                text="▸" if collapsed else "▾",
+                bg=COLORS["card"],
+                fg=COLORS["muted"] if searching else COLORS["accent"],
+                font=("Segoe UI Symbol", 10, "bold"),
+                cursor=heading_cursor,
+            )
+            arrow.pack(side="left")
+            title = tk.Label(
+                heading,
+                text=self._truncate(group.name, 28),
+                bg=COLORS["card"],
+                fg=COLORS["text"],
+                font=("Microsoft YaHei UI", 9, "bold"),
+                anchor="w",
+                cursor=heading_cursor,
+            )
+            title.pack(side="left", padx=(8, 6), fill="x", expand=True)
+            count_label = tk.Label(
+                heading,
+                text=f"{len(group.tasks)} 条",
+                bg=COLORS["nested"],
+                fg=COLORS["muted"],
+                font=("Microsoft YaHei UI", 8),
+                padx=6,
+                pady=2,
+                cursor=heading_cursor,
+            )
+            count_label.pack(side="right")
+            if not searching:
+                for widget in (heading, arrow, title, count_label):
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _event, project_path=group.path: self._toggle_project(project_path),
+                    )
+            if collapsed:
+                continue
             for task_index, task in enumerate(group.tasks):
                 if task_index:
                     tk.Frame(card, bg=COLORS["border"], height=1).pack(fill="x", padx=(36, 0))
                 self._task_row(card, task)
         self.root.after_idle(lambda: self.scroller.canvas.yview_moveto(scroll))
+
+    def _toggle_project(self, project_path: str) -> None:
+        if project_path in self.collapsed_projects:
+            self.collapsed_projects.remove(project_path)
+        else:
+            self.collapsed_projects.add(project_path)
+        self.settings["collapsed_projects"] = sorted(self.collapsed_projects)
+        self._save_settings()
+        self.render_tasks(preserve_scroll=True)
 
     def _task_row(self, parent: tk.Widget, task: CodexTask) -> None:
         row = tk.Frame(parent, bg=COLORS["card"], padx=12, pady=9, cursor="hand2")
@@ -463,7 +543,7 @@ class SidebarApp:
         )
         title.pack(side="left", fill="x", expand=True, padx=(9, 6))
         state = task.display_state
-        time_text = short_time_label(task.updated_ms)
+        time_text = short_time_label(task.recent_ms)
         if state == DisplayState.IDLE:
             status = tk.Label(row, text=time_text, bg=COLORS["nested"], fg=COLORS["muted"], font=("Microsoft YaHei UI", 8, "bold"), padx=7, pady=3, cursor="hand2")
             status.pack(side="right")
@@ -590,10 +670,10 @@ class SidebarApp:
             activebackground=COLORS["accent"] if selected else COLORS["border"],
         )
 
-    def _apply_dock(self) -> None:
+    def _apply_dock(self, found=None) -> None:
         if is_left_mouse_down():
             return
-        found = find_codex_window()
+        found = found or find_codex_window()
         if not found:
             self.status_text.set("等待 Codex 窗口")
             return
@@ -652,11 +732,37 @@ class SidebarApp:
     def _dock_tick(self) -> None:
         if self.closing:
             return
-        if self.mode == "docked":
-            self._apply_dock()
-        else:
-            self.root.attributes("-topmost", True)
+        self.tray.ensure_icon()
+        self._sync_companion_visibility()
         self.root.after(400, self._dock_tick)
+
+    def _sync_companion_visibility(self) -> None:
+        if self.closing:
+            return
+        found = find_codex_window()
+        if not found:
+            if self.companion_visible:
+                self._save_window_geometry()
+                self.companion_visible = False
+                self.root.withdraw()
+                self.dock_topmost = None
+            return
+        if not self.companion_visible:
+            self.root.update_idletasks()
+            hwnd = top_level_hwnd(self.root.winfo_id())
+            set_companion_style(hwnd, no_activate=True)
+            try:
+                show_without_activation(hwnd)
+                # Process the native map event while NOACTIVATE is still set.
+                self.root.update()
+            finally:
+                set_companion_style(top_level_hwnd(self.root.winfo_id()))
+            self.companion_visible = True
+            self.dock_topmost = None
+        if self.mode == "docked":
+            self._apply_dock(found)
+        else:
+            set_topmost(top_level_hwnd(self.root.winfo_id()), True)
 
     def _runtime_tick(self) -> None:
         if self.closing:
@@ -668,7 +774,7 @@ class SidebarApp:
         if self.closing:
             return
         self.refresh_full(silent=True)
-        self.root.after(30_000, self._full_tick)
+        self.root.after(FULL_REFRESH_MS, self._full_tick)
 
     def _usage_tick(self) -> None:
         if self.closing:
@@ -680,13 +786,15 @@ class SidebarApp:
         return f"吸附{self.side == 'left' and '左侧' or '右侧'}" if self.mode == "docked" else "单独置顶"
 
     def _on_configure(self, _event: tk.Event[tk.Misc]) -> None:
-        if self.closing or self.is_applying_dock:
+        if self.closing or self.is_applying_dock or not self.companion_visible:
             return
         if self.geometry_job:
             self.root.after_cancel(self.geometry_job)
         self.geometry_job = self.root.after(500, self._save_window_geometry)
 
     def _save_window_geometry(self) -> None:
+        if not self.companion_visible:
+            return
         if self.mode == "pinned":
             self.settings["pinned_geometry"] = self.root.geometry()
         else:
@@ -707,18 +815,21 @@ class SidebarApp:
     def close(self) -> None:
         if self.closing:
             return
+        self._save_window_geometry()
         self.closing = True
-        if self.mode == "pinned":
-            self.settings["pinned_geometry"] = self.root.geometry()
-        else:
-            self.settings["docked_size"] = [self.root.winfo_width(), self.root.winfo_height()]
-        self._save_settings()
+        self.tray.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
 
 def run() -> None:
-    enable_per_monitor_dpi()
-    root = tk.Tk()
-    SidebarApp(root)
-    root.mainloop()
+    mutex = acquire_sidebar_instance()
+    if mutex is None:
+        return
+    try:
+        enable_per_monitor_dpi()
+        root = tk.Tk()
+        SidebarApp(root)
+        root.mainloop()
+    finally:
+        kernel32.CloseHandle(mutex)

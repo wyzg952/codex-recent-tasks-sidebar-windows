@@ -125,6 +125,23 @@ class DataTests(unittest.TestCase):
         self.assertNotIn(older_id, {task.id for task in two_days})
         self.assertIn(older_id, {task.id for task in seven_days})
 
+    def test_recently_opened_task_uses_recency_without_changing_content_version(self) -> None:
+        connection = sqlite3.connect(self.db)
+        connection.execute("ALTER TABLE threads ADD COLUMN recency_at_ms INTEGER NOT NULL DEFAULT 0")
+        connection.execute("ALTER TABLE threads ADD COLUMN recency_at INTEGER NOT NULL DEFAULT 0")
+        content_updated_ms = 4_102_444_800_000 - 60_000
+        opened_ms = 4_102_444_800_000 + 1_000
+        connection.execute(
+            "UPDATE threads SET updated_at_ms = ?, recency_at_ms = ? WHERE id = ?",
+            (content_updated_ms, opened_ms, "00000000-0000-0000-0000-000000000002"),
+        )
+        connection.commit()
+        connection.close()
+        tasks = TaskRepository(self.paths).load(now_ms=4_102_444_800_000)
+        self.assertEqual(tasks[0].id, "00000000-0000-0000-0000-000000000002")
+        self.assertEqual(tasks[0].updated_ms, content_updated_ms)
+        self.assertEqual(tasks[0].activity_ms, opened_ms)
+
 
 if __name__ == "__main__":
     unittest.main()

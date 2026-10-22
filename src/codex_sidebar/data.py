@@ -242,20 +242,21 @@ def _requires_user_action(payload: dict[str, Any]) -> bool:
 
 
 class TaskRepository:
-    QUERY = """
+    QUERY_TEMPLATE = """
     SELECT id,
       CASE WHEN trim(title) = '' THEN '未命名任务' ELSE substr(title, 1, 240) END AS title,
       cwd, COALESCE(git_branch, '') AS git_branch,
       CAST(COALESCE(NULLIF(updated_at_ms, 0), updated_at * 1000) AS INTEGER) AS updated_ms,
+      CAST({activity_expression} AS INTEGER) AS activity_ms,
       COALESCE(rollout_path, '') AS rollout_path
     FROM threads AS task
     WHERE archived = 0
-      AND COALESCE(source, '') NOT LIKE '{"subagent"%'
+      AND COALESCE(source, '') NOT LIKE '{{"subagent"%'
       AND (agent_path IS NULL OR agent_path = '')
       AND NOT EXISTS (
         SELECT 1 FROM thread_spawn_edges AS edge WHERE edge.child_thread_id = task.id
       )
-    ORDER BY updated_ms DESC, id ASC
+    ORDER BY activity_ms DESC, updated_ms DESC, id ASC
     """
 
     def __init__(self, paths: DataPaths | None = None) -> None:
@@ -269,7 +270,20 @@ class TaskRepository:
         connection = sqlite3.connect(uri, uri=True, timeout=0.8)
         try:
             connection.execute("PRAGMA query_only=ON")
-            rows = connection.execute(self.QUERY).fetchall()
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")}
+            updated_expression = "COALESCE(NULLIF(task.updated_at_ms, 0), task.updated_at * 1000, 0)"
+            recency_parts = []
+            if "recency_at_ms" in columns:
+                recency_parts.append("NULLIF(task.recency_at_ms, 0)")
+            if "recency_at" in columns:
+                recency_parts.append("NULLIF(task.recency_at, 0) * 1000")
+            if recency_parts:
+                recency_expression = f"COALESCE({', '.join(recency_parts)}, 0)"
+                activity_expression = f"MAX({updated_expression}, {recency_expression})"
+            else:
+                activity_expression = updated_expression
+            query = self.QUERY_TEMPLATE.format(activity_expression=activity_expression)
+            rows = connection.execute(query).fetchall()
         finally:
             connection.close()
         names = self._load_names()
@@ -279,7 +293,8 @@ class TaskRepository:
         tasks: list[CodexTask] = []
         for row in rows:
             updated_ms = int(row[4])
-            if updated_ms < cutoff:
+            activity_ms = int(row[5])
+            if activity_ms < cutoff:
                 continue
             task_id = str(row[0])
             task = CodexTask(
@@ -288,8 +303,9 @@ class TaskRepository:
                 cwd=str(row[2]),
                 git_branch=str(row[3]),
                 updated_ms=updated_ms,
-                rollout_path=str(row[5]),
+                rollout_path=str(row[6]),
                 unread=task_id in unread_ids,
+                activity_ms=activity_ms,
             )
             tasks.append(task.with_updates(runtime=self.rollout_reader.read(task.rollout_path)))
         return tasks
